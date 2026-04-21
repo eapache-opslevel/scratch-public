@@ -3,23 +3,9 @@
 Test script to verify the static analysis workflow implementation.
 """
 
-import os
 import sys
-import subprocess
-import tempfile
-import shutil
 from pathlib import Path
-
-def run_command(cmd, cwd=None):
-    """Run a command and return the result."""
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        shell=True
-    )
-    return result.returncode, result.stdout, result.stderr
+from test_utils import run_command
 
 def test_script_exists():
     """Test that the script exists."""

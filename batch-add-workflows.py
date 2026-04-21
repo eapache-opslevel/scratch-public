@@ -7,13 +7,12 @@ applying the static analysis workflow to each one and generating a consolidated
 report of all operations.
 """
 
-import os
 import sys
 import json
 import argparse
 import subprocess
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,50 +41,60 @@ class BatchWorkflowManager:
         self.max_workers = max_workers
         self.results = []
         
-    def process_repository(self, repo_path: Path) -> Dict:
-        """Process a single repository.
+    def _create_result(self, repo_path: Path, success: bool = False, error: str = None) -> Dict:
+        """Create a standardized result dictionary.
         
         Args:
             repo_path: Path to the repository
+            success: Whether the operation was successful
+            error: Error message if any
             
         Returns:
             Dictionary with result information
         """
-        logger.info(f"Processing repository: {repo_path}")
-        
-        result = {
+        return {
             "repository": str(repo_path),
             "timestamp": datetime.now().isoformat(),
-            "success": False,
-            "error": None
+            "success": success,
+            "error": error
         }
+
+    def _validate_repository(self, repo_path: Path) -> Tuple[bool, Optional[str]]:
+        """Validate repository path and structure.
         
+        Args:
+            repo_path: Path to validate
+            
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not repo_path.exists():
+            return False, "Repository path does not exist"
+
+        if not repo_path.is_dir():
+            return False, "Repository path is not a directory"
+
+        if not (repo_path / ".git").exists():
+            return False, "Not a git repository"
+
+        return True, None
+
+    def _run_workflow_script(self, repo_path: Path) -> Tuple[bool, Optional[str]]:
+        """Run the workflow script on a repository.
+
+        Args:
+            repo_path: Path to the repository
+            
+        Returns:
+            Tuple of (success, error_message)
+        """
+        cmd = [
+            sys.executable,
+            str(Path(__file__).parent / "add-static-analysis-workflow.py"),
+            str(repo_path)
+        ]
+
         try:
-            # Check if path exists and is a directory
-            if not repo_path.exists():
-                result["error"] = "Repository path does not exist"
-                logger.error(f"{repo_path}: {result['error']}")
-                return result
-            
-            if not repo_path.is_dir():
-                result["error"] = "Repository path is not a directory"
-                logger.error(f"{repo_path}: {result['error']}")
-                return result
-            
-            # Check if it's a git repository
-            git_dir = repo_path / ".git"
-            if not git_dir.exists():
-                result["error"] = "Not a git repository"
-                logger.error(f"{repo_path}: {result['error']}")
-                return result
-            
-            # Run the workflow script
-            cmd = [
-                sys.executable,
-                str(Path(__file__).parent / "add-static-analysis-workflow.py"),
-                str(repo_path)
-            ]
-            
             process_result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -94,21 +103,41 @@ class BatchWorkflowManager:
             )
             
             if process_result.returncode != 0:
-                result["error"] = f"Script failed: {process_result.stderr}"
-                logger.error(f"{repo_path}: {result['error']}")
-                return result
+                return False, f"Script failed: {process_result.stderr}"
             
-            result["success"] = True
-            logger.info(f"Successfully processed: {repo_path}")
+            return True, None
             
         except subprocess.TimeoutExpired:
-            result["error"] = "Script execution timed out"
-            logger.error(f"{repo_path}: {result['error']}")
+            return False, "Script execution timed out"
         except Exception as e:
-            result["error"] = f"Unexpected error: {str(e)}"
-            logger.error(f"{repo_path}: {result['error']}")
+            return False, f"Unexpected error: {str(e)}"
+
+    def process_repository(self, repo_path: Path) -> Dict:
+        """Process a single repository.
         
-        return result
+        Args:
+            repo_path: Path to the repository
+
+        Returns:
+            Dictionary with result information
+        """
+        logger.info(f"Processing repository: {repo_path}")
+
+        # Validate repository
+        is_valid, error = self._validate_repository(repo_path)
+        if not is_valid:
+            logger.error(f"{repo_path}: {error}")
+            return self._create_result(repo_path, success=False, error=error)
+
+        # Run workflow script
+        success, error = self._run_workflow_script(repo_path)
+
+        if success:
+            logger.info(f"Successfully processed: {repo_path}")
+        else:
+            logger.error(f"{repo_path}: {error}")
+
+        return self._create_result(repo_path, success=success, error=error)
     
     def process_all(self) -> List[Dict]:
         """Process all repositories.
@@ -161,6 +190,53 @@ class BatchWorkflowManager:
         
         return results
     
+    def _get_action_from_log(self, repo_path: Path) -> str:
+        """Get the action from a repository's tracking log.
+
+        Args:
+            repo_path: Path to the repository
+
+        Returns:
+            Action string or None if not found
+        """
+        log_file = repo_path / "tracking-log.json"
+        if not log_file.exists():
+            return None
+
+        try:
+            with open(log_file, 'r') as f:
+                logs = json.load(f)
+
+            if not logs:
+                return None
+
+            return logs[-1].get("action")
+        except Exception:
+            return None
+
+    def _count_actions(self, results: List[Dict]) -> Dict[str, int]:
+        """Count actions taken across all repositories.
+
+        Args:
+            results: List of result dictionaries
+
+        Returns:
+            Dictionary of action counts
+        """
+        actions = {"created": 0, "updated": 0, "skipped": 0}
+
+        for result in results:
+            if not result["success"]:
+                continue
+
+            repo_path = Path(result["repository"])
+            action = self._get_action_from_log(repo_path)
+
+            if action in actions:
+                actions[action] += 1
+
+        return actions
+
     def generate_summary_report(self, results: List[Dict]) -> Dict:
         """Generate a summary report of all operations.
         
@@ -173,36 +249,15 @@ class BatchWorkflowManager:
         total = len(results)
         successful = sum(1 for r in results if r["success"])
         failed = total - successful
+        actions = self._count_actions(results)
         
-        # Load individual tracking logs to get detailed actions
-        actions = {"created": 0, "updated": 0, "skipped": 0}
-        
-        for result in results:
-            if result["success"]:
-                repo_path = Path(result["repository"])
-                log_file = repo_path / "tracking-log.json"
-                if log_file.exists():
-                    try:
-                        with open(log_file, 'r') as f:
-                            logs = json.load(f)
-                        if logs:
-                            # Get the last entry for this repo
-                            last_log = logs[-1]
-                            action = last_log.get("action")
-                            if action in actions:
-                                actions[action] += 1
-                    except Exception:
-                        pass
-        
-        summary = {
+        return {
             "total_repositories": total,
             "successful": successful,
             "failed": failed,
             "actions": actions,
             "timestamp": datetime.now().isoformat()
         }
-        
-        return summary
     
     def save_batch_report(self, results: List[Dict], output_file: str):
         """Save batch processing report to file.
@@ -271,8 +326,12 @@ def read_repo_list(file_path: str) -> List[str]:
     return repos
 
 
-def main():
-    """Main entry point."""
+def _create_argument_parser():
+    """Create and configure argument parser.
+
+    Returns:
+        Configured ArgumentParser instance
+    """
     parser = argparse.ArgumentParser(
         description="Batch add static analysis workflows to multiple repositories"
     )
@@ -305,31 +364,41 @@ def main():
         help="Output file for batch report (default: batch-report.json)"
     )
     
+    return parser
+
+
+def _get_repository_list(args):
+    """Get list of repositories from arguments.
+    
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        List of repository paths
+    """
+    if args.repos:
+        return args.repos
+    return read_repo_list(args.repo_file)
+
+
+def main():
+    """Main entry point."""
+    parser = _create_argument_parser()
     args = parser.parse_args()
     
-    # Get repository list
-    if args.repos:
-        repos = args.repos
-    else:
-        repos = read_repo_list(args.repo_file)
-    
+    repos = _get_repository_list(args)
     if not repos:
         logger.error("No repositories specified")
         return 1
     
     logger.info(f"Processing {len(repos)} repositories")
     
-    # Process repositories
     manager = BatchWorkflowManager(repos, args.parallel, args.max_workers)
     results = manager.process_all()
     
-    # Save report
     manager.save_batch_report(results, args.output)
-    
-    # Print summary
     manager.print_summary(results)
     
-    # Return non-zero if any failed
     failed = sum(1 for r in results if not r["success"])
     return 1 if failed > 0 else 0
 
