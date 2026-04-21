@@ -1,0 +1,13 @@
+name: Static Analysis
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  static-analysis:
+    uses: opslevel/.github/.github/workflows/static-analysis.yaml@main
