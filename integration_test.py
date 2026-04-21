@@ -6,24 +6,10 @@ This test creates temporary repositories with different configurations and
 verifies the automation handles them correctly.
 """
 
-import os
 import sys
 import tempfile
-import shutil
-import subprocess
 from pathlib import Path
-
-
-def run_command(cmd, cwd=None):
-    """Run a command and return result."""
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        shell=isinstance(cmd, str)
-    )
-    return result.returncode, result.stdout, result.stderr
+from test_utils import run_command
 
 
 def create_test_repo(path, branch_name="main"):
