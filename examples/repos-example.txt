@@ -1,0 +1,10 @@
+# Example repository list for batch processing
+# Lines starting with # are comments and will be ignored
+# Add one repository path per line
+
+# Example repositories
+/path/to/repo1
+/path/to/repo2
+/path/to/repo3
+
+# More repositories can be added here
